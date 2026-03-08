@@ -513,14 +513,14 @@ class ServerMonitor(Star):
                 current_y += LINE_SPACING
         
         mem_prefix = "内存使用: "
-        mem_total_mb = data.get('mem_total_mb')
-        mem_used_mb = data.get('mem_used_mb')
+        mem_total_mb = data['mem_total_mb']
+        mem_used_mb = data['mem_used_mb']
         mem_prefix_width = draw.textbbox((0, 0), mem_prefix, font=content_font_medium)[2]
         mem_start_x = x_pos + mem_prefix_width
 
         if mem_total_mb is not None and mem_used_mb is not None:
-            mem_usage_text = f"{mem_used_mb:.0f}MB / {mem_total_mb:.0f}MB"
-            draw.text((x_pos, current_y), mem_prefix + mem_usage_text, 
+            mem_usage_text = mem_prefix + f"{mem_used_mb:.0f}MB / {mem_total_mb:.0f}MB"
+            draw.text((x_pos, current_y), mem_usage_text, 
                       font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
 
