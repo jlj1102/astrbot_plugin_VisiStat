@@ -434,6 +434,9 @@ class ServerMonitor(Star):
         L_temp = len(temp_data_list)
         L_B += max(1, L_temp) 
         
+        L_memtext = 1 if data['mem_total_mb'] is not None and data['mem_used_mb'] is not None else 0
+        L_B += L_memtext
+
         L_bat = 1 if self.monitor_battery_status and data['bat_data']['percent'] is not None else 0
         L_B += L_bat
         
@@ -694,6 +697,8 @@ class ServerMonitor(Star):
         temp_data_list = self._format_temp_data(data['temp_results'])
         temp_lines_count = max(1, len(temp_data_list))
         
+        mem_lines_count = 1 if data.get('mem_total_mb') is not None and data.get('mem_used_mb') is not None else 0
+
         simple_lines_count = 4 
         if self.monitor_battery_status and data['bat_data']['percent'] is not None:
              simple_lines_count += 1
@@ -743,6 +748,13 @@ class ServerMonitor(Star):
                 draw.text((temp_start_x, current_y), label + value, 
                           font=content_font_medium, fill=text_block_fill)
                 current_y += LINE_SPACING
+
+        mem_total_mb = data['mem_total_mb']
+        mem_used_mb = data['mem_used_mb']
+        if mem_total_mb is not None and mem_used_mb is not None:
+            mem_usage_text = f"内存使用: {mem_used_mb:.0f}MB / {mem_total_mb:.0f}MB"
+            draw.text((x_pos, current_y), mem_usage_text, font=content_font_medium, fill=text_block_fill)
+            current_y += LINE_SPACING
         
         if self.monitor_battery_status and data['bat_data']['percent'] is not None:
             draw.text((x_pos, current_y), data['bat_data']['status_text'], font=content_font_medium, fill=text_block_fill)
