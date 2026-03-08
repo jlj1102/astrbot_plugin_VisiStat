@@ -12,8 +12,6 @@ import matplotlib.pyplot as plt
 import io
 import base64
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-import numpy as np
-from scipy import stats
 from pathlib import Path
 import json
 
@@ -525,7 +523,7 @@ class ServerMonitor(Star):
             draw.text((x_pos, current_y), mem_prefix + mem_usage_text, 
                       font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
-            
+
         if self.monitor_battery_status and data['bat_data']['percent'] is not None:
             draw.text((x_pos, current_y), data['bat_data']['status_text'], font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
