@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import io
 import base64
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import numpy as np
+from scipy import stats
 from pathlib import Path
 import json
 
@@ -512,6 +514,18 @@ class ServerMonitor(Star):
                           font=content_font_medium, fill=text_block_fill)
                 current_y += LINE_SPACING
         
+        mem_prefix = "内存使用: "
+        mem_total_mb = data.get('mem_total_mb')
+        mem_used_mb = data.get('mem_used_mb')
+        mem_prefix_width = draw.textbbox((0, 0), mem_prefix, font=content_font_medium)[2]
+        mem_start_x = x_pos + mem_prefix_width
+
+        if mem_total_mb is not None and mem_used_mb is not None:
+            mem_usage_text = f"{mem_used_mb:.0f}MB / {mem_total_mb:.0f}MB"
+            draw.text((x_pos, current_y), mem_prefix + mem_usage_text, 
+                      font=content_font_medium, fill=text_block_fill)
+            current_y += LINE_SPACING
+            
         if self.monitor_battery_status and data['bat_data']['percent'] is not None:
             draw.text((x_pos, current_y), data['bat_data']['status_text'], font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
@@ -822,6 +836,8 @@ class ServerMonitor(Star):
             mem = psutil.virtual_memory()
             disk = psutil.disk_usage('/')
             mem_percent = mem.percent
+            mem_total_mb = round(mem.total / (1000 * 1000) , 0)
+            mem_used_mb = round(mem.used / (1000 * 1000), 2)
             
             disk_percent = disk.percent
             
@@ -846,6 +862,8 @@ class ServerMonitor(Star):
             status_data = {
                 'cpu_percent': cpu_usage,
                 'mem_percent': mem_percent,
+                'mem_total_mb': mem_total_mb,
+                'mem_used_mb': mem_used_mb,
                 'disk_percent': disk_percent,
                 'cpu_image': cpu_image,
                 'mem_image': mem_image,
