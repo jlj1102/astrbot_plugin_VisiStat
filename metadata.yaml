@@ -1,4 +1,4 @@
-name: astrbot_plugin_VisiStat # 这是你的插件的唯一识别名。
+name: astrbot_plugin_VisiStatneo # 这是你的插件的唯一识别名。
 display_name: 可视化服务状态监控
 desc: 可视化的系统硬件监控，可自定义美化以及自定义参数显示，适配Windows/Linux双端  # 插件简短描述
 version: v1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
