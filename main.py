@@ -266,64 +266,80 @@ class ServerMonitor(Star):
 
     def _get_neofetch_columns(self) -> Tuple[List[str], List[str]]:
         """
-        Run neofetch inside a temporary tmux session, then use
-        `tmux capture-pane -p` to get the already-rendered plain-text grid.
-        This avoids any PTY or ANSI simulation complexity — tmux does the
-        terminal emulation for us.
+        Run neofetch inside a temporary detached tmux session.
+        tmux acts as the terminal emulator, so neofetch renders its full
+        ASCII + info layout. We capture the pane with full scrollback (-S -)
+        once a unique sentinel line appears, then split into two columns.
         """
-        import uuid
-        session = f'visistat_{uuid.uuid4().hex[:8]}'
+        import uuid, time
+        session  = f'visistat_{uuid.uuid4().hex[:8]}'
+        sentinel = f'VISISTAT_DONE_{uuid.uuid4().hex}'
         try:
             cmd = ['neofetch']
             if self.neofetch_extra_args:
                 cmd += self.neofetch_extra_args.split()
-
+            neofetch_str = ' '.join(cmd)
             env = {**os.environ, 'TERM': 'xterm-256color'}
 
-            # Create a detached tmux session with a wide window so neofetch
-            # doesn't wrap its ASCII art
+            # Wide window so ASCII art never wraps
             subprocess.run(
-                ['tmux', 'new-session', '-d', '-s', session, '-x', '300', '-y', '50'],
+                ['tmux', 'new-session', '-d', '-s', session, '-x', '220', '-y', '60'],
                 env=env, check=True, capture_output=True
             )
 
-            # Run neofetch inside the session and wait for it to finish
-            neofetch_cmd = ' '.join(cmd)
+            # Run neofetch then immediately echo the sentinel on a fresh line.
+            # Using printf to avoid any shell alias issues with echo.
             subprocess.run(
-                ['tmux', 'send-keys', '-t', session, neofetch_cmd + '; tmux wait-for -S done', 'Enter'],
+                ['tmux', 'send-keys', '-t', session,
+                 f'{neofetch_str} ; printf "\n{sentinel}\n"', 'Enter'],
                 env=env, check=True, capture_output=True
             )
-            subprocess.run(
-                ['tmux', 'wait-for', 'done'],
-                env=env, timeout=15, capture_output=True
-            )
 
-            # Capture the pane contents as plain text (no ANSI codes)
-            result = subprocess.run(
-                ['tmux', 'capture-pane', '-p', '-t', session],
-                env=env, capture_output=True, text=True, check=True
-            )
-            raw_lines = result.stdout.split('\n')
+            # Poll for the sentinel in the pane output (max 15 s)
+            captured = ''
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                time.sleep(0.3)
+                r = subprocess.run(
+                    ['tmux', 'capture-pane', '-p', '-S', '-', '-t', session],
+                    env=env, capture_output=True, text=True
+                )
+                captured = r.stdout
+                if sentinel in captured:
+                    break
 
         except FileNotFoundError:
-            return ['tmux not found'], ['']
+            return ['tmux not found — install tmux to use this feature'], ['']
         except subprocess.CalledProcessError as e:
             return [f'tmux error: {e}'], ['']
         except Exception as e:
             return [f'neofetch error: {e}'], ['']
         finally:
-            # Always kill the session to avoid leaking it
-            subprocess.run(
-                ['tmux', 'kill-session', '-t', session],
-                capture_output=True
-            )
+            subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
 
-        # Strip trailing whitespace per line; trim surrounding blank lines
-        grid_lines = [l.rstrip() for l in raw_lines]
-        while grid_lines and not grid_lines[0].strip():  grid_lines.pop(0)
-        while grid_lines and not grid_lines[-1].strip(): grid_lines.pop()
+        # Extract only the lines between session start and the sentinel.
+        # Discard everything from the sentinel line onward (prompt, etc.)
+        raw_lines = captured.split('\n')
+        clean: List[str] = []
+        for line in raw_lines:
+            if sentinel in line:
+                break
+            clean.append(line.rstrip())
 
-        return self._split_neofetch_columns(grid_lines)
+        # Drop the very first line if it is the shell prompt / command echo
+        # (it typically starts with '$', '#', '%', or the neofetch command itself)
+        while clean and (
+            not clean[0].strip()
+            or clean[0].lstrip().startswith(('$', '#', '%', 'neofetch'))
+        ):
+            clean.pop(0)
+
+        # Trim trailing blank lines
+        while clean and not clean[-1].strip():
+            clean.pop()
+
+        return self._split_neofetch_columns(clean)
+
 
     def _split_neofetch_columns(self, grid_lines: List[str]) -> Tuple[List[str], List[str]]:
         """
