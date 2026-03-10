@@ -144,5 +144,46 @@
                 "hint": "大于1.0放大，小于1.0缩小，例如1.2会放大20%"
             }
         }
+    },
+    "neofetch_config": {
+        "description": "neofetch 输出面板设置（附加在卡片底部）",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "是否在状态卡片底部附加 neofetch 输出",
+                "type": "bool",
+                "default": false
+            },
+            "font_size": {
+                "description": "neofetch 面板的字体大小（像素）",
+                "type": "int",
+                "default": 14,
+                "hint": "建议范围 10–20，使用等宽字体渲染"
+            },
+            "extra_args": {
+                "description": "传递给 neofetch 命令的额外参数",
+                "type": "string",
+                "default": "",
+                "hint": "例如：--disable packages --disable theme，留空则使用默认输出"
+            },
+            "background_color": {
+                "description": "neofetch 面板的背景颜色",
+                "type": "string",
+                "default": "#0d1117",
+                "hint": "16进制颜色代码，推荐深色背景以衬托彩虹文字"
+            },
+            "rainbow_freq": {
+                "description": "彩虹色每行色相偏移量（模拟 lolcat --freq）",
+                "type": "float",
+                "default": 0.3,
+                "hint": "值越大彩虹循环越快，推荐范围 0.1–0.8"
+            },
+            "rainbow_spread": {
+                "description": "彩虹色每字符色相偏移量（模拟 lolcat --spread）",
+                "type": "float",
+                "default": 0.05,
+                "hint": "值越大同一行内颜色变化越快，推荐范围 0.02–0.15"
+            }
+        }
     }
 }

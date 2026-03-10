@@ -7,6 +7,8 @@ import datetime
 import asyncio
 import os
 import re
+import subprocess
+import colorsys
 from typing import Optional, Dict, Any, Tuple, List
 import matplotlib.pyplot as plt
 import io
@@ -84,6 +86,14 @@ class ServerMonitor(Star):
         layout_cfg = self.config.get('layout_config', {})
         self.v_scale_factor = layout_cfg.get('vertical_scale', 1.0)
         self.h_scale_factor = layout_cfg.get('horizontal_scale', 1.0)
+
+        neofetch_cfg = self.config.get('neofetch_config', {})
+        self.neofetch_enabled = neofetch_cfg.get('enabled', False)
+        self.neofetch_font_size = neofetch_cfg.get('font_size', 14)
+        self.neofetch_extra_args = neofetch_cfg.get('extra_args', '')
+        self.neofetch_bg_color = neofetch_cfg.get('background_color', '#0d1117')
+        self.neofetch_rainbow_freq = neofetch_cfg.get('rainbow_freq', 0.3)
+        self.neofetch_rainbow_spread = neofetch_cfg.get('rainbow_spread', 0.05)
         
         self.default_font = self._load_font('', 16) 
         
@@ -162,6 +172,23 @@ class ServerMonitor(Star):
         except IOError:
             return ImageFont.load_default()
 
+    def _load_monospace_font(self, size: int) -> ImageFont.FreeTypeFont:
+        """Load a monospace font for neofetch rendering."""
+        mono_candidates = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf',
+            '/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf',
+            '/usr/share/fonts/truetype/freefont/FreeMono.ttf',
+            'Courier New.ttf',
+            'Consolas.ttf',
+        ]
+        for path in mono_candidates:
+            try:
+                return ImageFont.truetype(path, size)
+            except IOError:
+                continue
+        return self._load_font(self.content_font_path, size)
+
     def _load_avatar(self, size: int) -> Image.Image:
         if self.fixed_avatar_path:
             try:
@@ -192,7 +219,6 @@ class ServerMonitor(Star):
         
         return " ".join(time_units)
 
-
     def _make_circular(self, img: Image.Image) -> Image.Image:
         size = img.size[0]
         mask = Image.new('L', (size, size), 0)
@@ -211,7 +237,6 @@ class ServerMonitor(Star):
         sizes = [value, 100 - value]
         colors = [color, bg_color]
         
-
         try:
             font = self._load_font(self.content_font_path, int(size*0.09)).getname()
             plt.rcParams['font.family'] = font[0]
@@ -224,7 +249,6 @@ class ServerMonitor(Star):
         plt.axis('equal')
         
         center_text = f"{value:.1f}%"
-        
         font_size_pt = size * 0.09 * (72 / 100) 
         plt.text(0, 0, center_text, ha='center', va='center', fontsize=font_size_pt, color='#ffffff', fontweight='bold')
         
@@ -237,6 +261,108 @@ class ServerMonitor(Star):
         plt.clf()
         plt.close('all')
         return chart_image
+
+    # ── neofetch / lolcat ─────────────────────────────────────────────────────
+
+    def _get_neofetch_output(self) -> List[str]:
+        """Run neofetch --stdout and return clean lines (ANSI codes stripped)."""
+        try:
+            cmd = ['neofetch', '--stdout']
+            if self.neofetch_extra_args:
+                cmd += self.neofetch_extra_args.split()
+            result = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, 'TERM': 'xterm-256color'}
+            )
+            raw = result.stdout
+            # Strip all ANSI / VT escape sequences
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            lines = [ansi_escape.sub('', line) for line in raw.split('\n')]
+            # Trim surrounding blank lines, preserve internal ones
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            while lines and not lines[-1].strip():
+                lines.pop()
+            return lines
+        except FileNotFoundError:
+            return ["neofetch not found",
+                    "Install with: sudo apt install neofetch"]
+        except Exception as e:
+            return [f"neofetch error: {e}"]
+
+    def _lolcat_color(self, line_idx: int, char_idx: int) -> Tuple[int, int, int]:
+        """
+        Reproduce lolcat's diagonal HSV rainbow.
+        hue shifts by rainbow_freq per line and rainbow_spread per character.
+        """
+        hue = (line_idx * self.neofetch_rainbow_freq
+               + char_idx * self.neofetch_rainbow_spread) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+    def _build_neofetch_panel(self, lines: List[str], card_width: int) -> Image.Image:
+        """
+        Render neofetch output with per-character lolcat rainbow colouring.
+        Returns a new RGBA image the same width as the main card.
+        """
+        font = self._load_monospace_font(self.neofetch_font_size)
+
+        # Measure line height
+        tmp = Image.new('RGB', (1, 1))
+        tmp_draw = ImageDraw.Draw(tmp)
+        sample_bbox = tmp_draw.textbbox((0, 0), "Ag", font=font)
+        line_h = sample_bbox[3] - sample_bbox[1]
+        line_spacing = int(line_h * 1.35)
+
+        # Parse background colour
+        try:
+            r = int(self.neofetch_bg_color[1:3], 16)
+            g = int(self.neofetch_bg_color[3:5], 16)
+            b = int(self.neofetch_bg_color[5:7], 16)
+            bg_color: tuple = (r, g, b, 255)
+        except Exception:
+            bg_color = (13, 17, 23, 255)
+
+        MARGIN = 20
+        SEPARATOR_H = 2
+        hdr_font = self._load_font(self.content_font_path, self.neofetch_font_size)
+        HEADER_H = line_spacing + MARGIN          # one row for "── neofetch ──"
+        content_h = len(lines) * line_spacing + MARGIN
+        panel_h = SEPARATOR_H + HEADER_H + content_h + MARGIN
+
+        panel = Image.new('RGBA', (card_width, panel_h), bg_color)
+        draw = ImageDraw.Draw(panel)
+
+        # Top separator
+        draw.line([(MARGIN, 0), (card_width - MARGIN, 0)],
+                  fill=self.font_color, width=SEPARATOR_H)
+
+        # Centred header
+        header_text = "── neofetch ──"
+        hdr_bbox = draw.textbbox((0, 0), header_text, font=hdr_font)
+        hdr_w = hdr_bbox[2] - hdr_bbox[0]
+        draw.text(
+            ((card_width - hdr_w) // 2, SEPARATOR_H + MARGIN // 2),
+            header_text, font=hdr_font, fill=self.font_color
+        )
+
+        # Neofetch lines with lolcat rainbow, char by char
+        current_y = SEPARATOR_H + HEADER_H
+        for line_idx, line in enumerate(lines):
+            x = MARGIN
+            for char_idx, char in enumerate(line):
+                color = self._lolcat_color(line_idx, char_idx)
+                draw.text((x, current_y), char, font=font, fill=color)
+                cb = draw.textbbox((0, 0), char, font=font)
+                x += cb[2] - cb[0]
+                if x >= card_width - MARGIN:
+                    break
+            current_y += line_spacing
+
+        return panel
+
+    # ── sensor helpers ────────────────────────────────────────────────────────
 
     def _get_linux_temp_data(self, temp_unit: str) -> Dict[str, Optional[float]]:
         temp_data = {'cpu_temp': None, 'gpu_temp': None, 'bat_temp': None}
@@ -257,7 +383,6 @@ class ServerMonitor(Star):
                     if 'cpu' in name.lower() or 'package' in name.lower():
                         cpu_temps = entries
                         break
-
             if cpu_temps:
                 temp_data['cpu_temp'] = max(e.current for e in cpu_temps if e.current is not None) if cpu_temps else None
 
@@ -310,7 +435,6 @@ class ServerMonitor(Star):
                     cpu_temps = temps.get('coretemp', [])
                     if cpu_temps:
                         temp_results['cpu_temp'] = max(e.current for e in cpu_temps if e.current is not None)
-                
 
         bat = psutil.sensors_battery()
         bat_data = {'percent': None, 'status_text': '电池信息: N/A'}
@@ -338,6 +462,7 @@ class ServerMonitor(Star):
 
         return temp_results, bat_data
 
+    # ── text helpers ──────────────────────────────────────────────────────────
 
     def _manual_wrap_text(self, text, font, draw_obj, max_width):
         if not text: return [""]
@@ -385,6 +510,7 @@ class ServerMonitor(Star):
         
         return temp_data_list
 
+    # ── layout drawing ────────────────────────────────────────────────────────
 
     def _draw_vertical_layout(self, canvas, data, avatar_img, user_name):
         CARD_WIDTH, CARD_HEIGHT = canvas.size
@@ -392,14 +518,11 @@ class ServerMonitor(Star):
         SCALE_FACTOR = self.v_scale_factor 
         
         MARGIN_BASE = int(base_ref * 0.05 * SCALE_FACTOR)
-        
         TITLE_FONT_SIZE = int(base_ref * 0.08 * SCALE_FACTOR) 
         NAME_FONT_SIZE = int(base_ref * 0.06 * SCALE_FACTOR) 
         CONTENT_FONT_MEDIUM_SIZE = int(base_ref * 0.045 * SCALE_FACTOR) 
         LINE_SPACING = int(base_ref * 0.06 * SCALE_FACTOR)
-        
         AVATAR_SIZE = int(base_ref * 0.15 * SCALE_FACTOR) 
-        
         SEPARATOR_WIDTH = 2
 
         main_font = self._load_font(self.content_font_path, TITLE_FONT_SIZE)
@@ -411,7 +534,6 @@ class ServerMonitor(Star):
         x_pos = MARGIN_BASE
         INFO_MAX_WIDTH = CARD_WIDTH - 2 * MARGIN_BASE
 
-
         name_bbox = draw.textbbox((0, 0), user_name, font=name_font)
         name_h = name_bbox[3] - name_bbox[1]
         small_gap = int(base_ref * 0.01 * SCALE_FACTOR)
@@ -422,76 +544,46 @@ class ServerMonitor(Star):
         H_A = max(AVATAR_SIZE, H_text_A)
 
         L_B = 0
-        
         prefix_sys = "系统信息: "
         prefix_width_sys = draw.textbbox((0, 0), prefix_sys, font=content_font_medium)[2] 
         content_max_width_sys = INFO_MAX_WIDTH - prefix_width_sys 
         system_info_content_lines = self._manual_wrap_text(data['system_info'], content_font_medium, draw, content_max_width_sys)
-        L_sys = len(system_info_content_lines)
-        L_B += L_sys
+        L_B += len(system_info_content_lines)
         
         temp_data_list = self._format_temp_data(data['temp_results'])
-        L_temp = len(temp_data_list)
-        L_B += max(1, L_temp) 
-        
-        L_memtext = 1 if data['mem_total_mb'] is not None and data['mem_used_mb'] is not None else 0
-        L_B += L_memtext
+        L_B += max(1, len(temp_data_list))
 
-        L_bat = 1 if self.monitor_battery_status and data['bat_data']['percent'] is not None else 0
-        L_B += L_bat
-        
-        L_fixed = 2 
-        L_B += L_fixed
+        L_B += 1 if data['mem_total_mb'] is not None and data['mem_used_mb'] is not None else 0
+        L_B += 1 if self.monitor_battery_status and data['bat_data']['percent'] is not None else 0
+        L_B += 2  # uptime + current_time
         
         H_B = L_B * LINE_SPACING
 
         gap_charts = MARGIN_BASE // 2
         CHART_SIZE = (CARD_WIDTH - 2 * MARGIN_BASE - 2 * gap_charts) // 3 
-        
         label_font = content_font_medium 
-
         label_h = draw.textbbox((0, 0), "CPU", font=label_font)[3] 
         label_v_margin = MARGIN_BASE // 4 
-
         H_C = (2 * LINE_SPACING) + MARGIN_BASE + label_h + label_v_margin + CHART_SIZE
 
-        
         M = MARGIN_BASE 
-        
+        H_REQUIRED = H_A + H_B + H_C + 5 * M + SEPARATOR_WIDTH
 
-        H_FIXED_GAPS = 5 * M
-        
-        H_REQUIRED = H_A + H_B + H_C + H_FIXED_GAPS + SEPARATOR_WIDTH
-        
-
-        OFFSET_Y = 0
-        if CARD_HEIGHT > H_REQUIRED:
-            OFFSET_Y = (CARD_HEIGHT - H_REQUIRED) // 2
-        
-
+        OFFSET_Y = max(0, (CARD_HEIGHT - H_REQUIRED) // 2)
         HEADER_Y_START = OFFSET_Y + M
         
         avatar_img = avatar_img.resize((AVATAR_SIZE, AVATAR_SIZE), Image.Resampling.LANCZOS)
         avatar_img = self._make_circular(avatar_img)
-        
-
-        avatar_y_start = HEADER_Y_START + (H_A - AVATAR_SIZE) // 2 
-        
-        canvas.paste(avatar_img, (x_pos, avatar_y_start), avatar_img)
+        canvas.paste(avatar_img, (x_pos, HEADER_Y_START + (H_A - AVATAR_SIZE) // 2), avatar_img)
 
         text_y_start = HEADER_Y_START + (H_A - H_text_A) // 2 
-        
         draw.text((x_pos + AVATAR_SIZE + MARGIN_BASE, text_y_start), user_name, font=name_font, fill=self.title_font_color)
         draw.text((x_pos + AVATAR_SIZE + MARGIN_BASE, text_y_start + name_h + small_gap), self.main_title, font=main_font, fill=self.title_font_color)
 
-
         current_y = HEADER_Y_START + H_A + M 
         
-        prefix_sys = "系统信息: "
-        prefix_width_sys = draw.textbbox((0, 0), prefix_sys, font=content_font_medium)[2] 
         draw.text((x_pos, current_y), prefix_sys + system_info_content_lines[0], font=content_font_medium, fill=text_block_fill)
         current_y += LINE_SPACING
-        
         for line in system_info_content_lines[1:]:
             draw.text((x_pos + prefix_width_sys, current_y), line.lstrip(), font=content_font_medium, fill=text_block_fill) 
             current_y += LINE_SPACING
@@ -506,24 +598,15 @@ class ServerMonitor(Star):
              current_y += LINE_SPACING
         else:
             first_label, first_value = temp_data_list[0]
-            draw.text((x_pos, current_y), temp_prefix + first_label + first_value, 
-                      font=content_font_medium, fill=text_block_fill)
+            draw.text((x_pos, current_y), temp_prefix + first_label + first_value, font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
-            
             for label, value in temp_data_list[1:]:
-                draw.text((temp_start_x, current_y), label + value, 
-                          font=content_font_medium, fill=text_block_fill)
+                draw.text((temp_start_x, current_y), label + value, font=content_font_medium, fill=text_block_fill)
                 current_y += LINE_SPACING
-        
-        mem_prefix = "内存使用: "
-        mem_total_mb = data['mem_total_mb']
-        mem_used_mb = data['mem_used_mb']
-        mem_prefix_width = draw.textbbox((0, 0), mem_prefix, font=content_font_medium)[2]
-        mem_start_x = x_pos + mem_prefix_width
 
-        if mem_total_mb is not None and mem_used_mb is not None:
-            mem_usage_text = mem_prefix + f"{mem_used_mb:.0f}MB / {mem_total_mb:.0f}MB"
-            draw.text((x_pos, current_y), mem_usage_text, 
+        if data['mem_total_mb'] is not None and data['mem_used_mb'] is not None:
+            draw.text((x_pos, current_y),
+                      f"内存使用: {data['mem_used_mb']:.0f}MB / {data['mem_total_mb']:.0f}MB",
                       font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
 
@@ -531,39 +614,26 @@ class ServerMonitor(Star):
             draw.text((x_pos, current_y), data['bat_data']['status_text'], font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
 
-        info_lines_block1_simple = [
+        for line, font in [
             (f"运行时间: {data['uptime']}", content_font_medium),
             (f"当前时间: {data['current_time']}", content_font_medium),
-        ]
-
-        for line, font in info_lines_block1_simple:
+        ]:
             draw.text((x_pos, current_y), line, font=font, fill=text_block_fill)
             current_y += LINE_SPACING
-        
 
         SEP_Y = current_y + M + SEPARATOR_WIDTH // 2 
         draw.line([(MARGIN_BASE, SEP_Y), (CARD_WIDTH - MARGIN_BASE, SEP_Y)], fill=self.font_color, width=SEPARATOR_WIDTH)
-
         current_y = SEP_Y + SEPARATOR_WIDTH // 2 + M 
 
-        traffic_title = f"网络流量:"
+        traffic_title = "网络流量:"
         traffic_data = f"↑{data['net_sent']:.2f}MB ↓{data['net_recv']:.2f}MB" 
-        
-        title_bbox = draw.textbbox((0, 0), traffic_title, font=content_font_medium)
-        title_w = title_bbox[2] - title_bbox[0]
-        title_x_centered = (CARD_WIDTH - title_w) // 2 
-        
 
-        data_bbox = draw.textbbox((0, 0), traffic_data, font=content_font_medium)
-        data_w = data_bbox[2] - data_bbox[0]
-        data_x_centered = (CARD_WIDTH - data_w) // 2
-        
-        draw.text((title_x_centered, current_y), traffic_title, font=content_font_medium, fill=text_block_fill)
+        title_w = draw.textbbox((0, 0), traffic_title, font=content_font_medium)[2]
+        draw.text(((CARD_WIDTH - title_w) // 2, current_y), traffic_title, font=content_font_medium, fill=text_block_fill)
         current_y += LINE_SPACING
-        
-        draw.text((data_x_centered, current_y), traffic_data, font=content_font_medium, fill=text_block_fill)
+        data_w = draw.textbbox((0, 0), traffic_data, font=content_font_medium)[2]
+        draw.text(((CARD_WIDTH - data_w) // 2, current_y), traffic_data, font=content_font_medium, fill=text_block_fill)
         current_y += LINE_SPACING
-        
 
         current_y += MARGIN_BASE 
         
@@ -575,40 +645,22 @@ class ServerMonitor(Star):
 
         gap_charts = MARGIN_BASE // 2
         CHART_SIZE = (CARD_WIDTH - 2 * MARGIN_BASE - 2 * gap_charts) // 3
-        
-
         total_charts_width = len(charts) * CHART_SIZE + (len(charts) - 1) * gap_charts
+        start_x = MARGIN_BASE + (CARD_WIDTH - 2 * MARGIN_BASE - total_charts_width) // 2
 
-        remaining_gap_on_sides = CARD_WIDTH - 2 * MARGIN_BASE - total_charts_width 
-        start_x = MARGIN_BASE + remaining_gap_on_sides // 2
-        
-
-        label_font = content_font_medium 
         label_h = draw.textbbox((0, 0), "CPU", font=label_font)[3] 
         label_v_margin = MARGIN_BASE // 4 
-        
         chart_y_start = current_y + label_h + label_v_margin 
-        
         label_y = current_y - LINE_SPACING + (LINE_SPACING + label_h + label_v_margin) // 2 
-        
-        chart_y = chart_y_start
         
         for i, (label, value, chart_img) in enumerate(charts):
             resized_chart_img = chart_img.resize((CHART_SIZE, CHART_SIZE), Image.Resampling.LANCZOS)
-            
             chart_x = start_x + i * (CHART_SIZE + gap_charts)
-            
-            label_bbox = draw.textbbox((0, 0), label, font=label_font)
-            label_w = label_bbox[2]
-
-            label_x = chart_x + (CHART_SIZE - label_w) // 2
-            
-            draw.text((label_x, label_y), label, font=label_font, fill=self.font_color)
-            
-            canvas.paste(resized_chart_img, (chart_x, int(chart_y)), resized_chart_img)
+            label_w = draw.textbbox((0, 0), label, font=label_font)[2]
+            draw.text((chart_x + (CHART_SIZE - label_w) // 2, label_y), label, font=label_font, fill=self.font_color)
+            canvas.paste(resized_chart_img, (chart_x, int(chart_y_start)), resized_chart_img)
             
         return canvas
-
 
     def _draw_horizontal_layout(self, canvas, data, avatar_img, user_name):
         CARD_WIDTH, CARD_HEIGHT = canvas.size
@@ -627,7 +679,6 @@ class ServerMonitor(Star):
         SCALE_FACTOR = dynamic_scale * self.h_scale_factor 
         
         MARGIN = int(base_ref * 0.04 * SCALE_FACTOR)
-        
         H_GAP = MARGIN 
         MIDDLE_GAP = int(H_GAP * 0.75) 
         
@@ -648,38 +699,23 @@ class ServerMonitor(Star):
         draw = ImageDraw.Draw(canvas)
         text_block_fill = self.font_color
 
-        
         num_charts = 3
-        
-        BASE_GAP_PIXELS = 15
-        gap = BASE_GAP_PIXELS 
+        gap = 15
 
         LABEL_CHART_GAP = MARGIN // 3
-        
         label_font = content_font_medium 
         label_h = draw.textbbox((0, 0), "MEM", font=label_font)[3] - draw.textbbox((0, 0), "MEM", font=label_font)[1]
         LABEL_TOP_PADDING = MARGIN // 4 
         
         total_card_vertical_space = CARD_HEIGHT - 2 * MARGIN
-
         single_chart_vertical_overhead = label_h + LABEL_TOP_PADDING + LABEL_CHART_GAP
         total_vertical_spacing = num_charts * single_chart_vertical_overhead + (num_charts - 1) * gap
-
-        CHART_SIZE_Vertical = (total_card_vertical_space - total_vertical_spacing) // num_charts
-        
-        MIN_CHART_SIZE = 100
-        CHART_SIZE = max(MIN_CHART_SIZE, CHART_SIZE_Vertical)
-        
+        CHART_SIZE = max(100, (total_card_vertical_space - total_vertical_spacing) // num_charts)
         CHART_BLOCK_WIDTH = CHART_SIZE + MARGIN // 2 
-
-        
         CHART_AREA_RIGHT_START_X = CARD_WIDTH - H_GAP - CHART_BLOCK_WIDTH 
-
         INFO_MAX_WIDTH = CHART_AREA_RIGHT_START_X - AVATAR_X - MIDDLE_GAP 
 
-
         x_pos = AVATAR_X 
-
 
         name_h_estimate = draw.textbbox((0, 0), user_name, font=name_font)[3] - draw.textbbox((0, 0), user_name, font=name_font)[1]
         title_h_estimate = draw.textbbox((0, 0), self.main_title, font=main_font)[3] - draw.textbbox((0, 0), self.main_title, font=main_font)[1]
@@ -690,27 +726,20 @@ class ServerMonitor(Star):
 
         prefix_sys = "系统信息: "
         prefix_width_sys = draw.textbbox((0, 0), prefix_sys, font=content_font_medium)[2] 
-        content_max_width_sys = INFO_MAX_WIDTH - prefix_width_sys 
-        system_info_content_lines = self._manual_wrap_text(data['system_info'], content_font_medium, draw, content_max_width_sys)
-        sys_info_lines_count = len(system_info_content_lines)
+        system_info_content_lines = self._manual_wrap_text(
+            data['system_info'], content_font_medium, draw, INFO_MAX_WIDTH - prefix_width_sys)
         
         temp_data_list = self._format_temp_data(data['temp_results'])
-        temp_lines_count = max(1, len(temp_data_list))
-        
         mem_lines_count = 1 if data.get('mem_total_mb') is not None and data.get('mem_used_mb') is not None else 0
-
-        simple_lines_count = 4 
+        simple_lines_count = 4
         if self.monitor_battery_status and data['bat_data']['percent'] is not None:
              simple_lines_count += 1
         
-        total_A_content_lines = sys_info_lines_count + temp_lines_count + simple_lines_count
+        total_A_content_lines = len(system_info_content_lines) + max(1, len(temp_data_list)) + mem_lines_count + simple_lines_count
         total_A_content_height = total_A_content_lines * LINE_SPACING + MARGIN // 2
-        
-        HEADER_CONTENT_GAP = MARGIN // 2 
-        total_A_block_height = HEADER_H + HEADER_CONTENT_GAP + total_A_content_height
+        total_A_block_height = HEADER_H + MARGIN // 2 + total_A_content_height
 
-        initial_y_offset_A = (total_card_vertical_space - total_A_block_height) // 2 
-        A_BLOCK_START_Y = MARGIN + initial_y_offset_A
+        A_BLOCK_START_Y = MARGIN + (total_card_vertical_space - total_A_block_height) // 2
         
         HEADER_Y_START = A_BLOCK_START_Y
         avatar_y = HEADER_Y_START + (HEADER_H - AVATAR_SIZE) // 2
@@ -722,11 +751,10 @@ class ServerMonitor(Star):
         draw.text((AVATAR_X + AVATAR_SIZE + H_GAP, text_y_start), user_name, font=name_font, fill=self.title_font_color)
         draw.text((AVATAR_X + AVATAR_SIZE + H_GAP, text_y_start + name_h_estimate + name_title_gap), self.main_title, font=main_font, fill=self.title_font_color)
         
-        current_y = A_BLOCK_START_Y + HEADER_H + HEADER_CONTENT_GAP
+        current_y = A_BLOCK_START_Y + HEADER_H + MARGIN // 2
         
         draw.text((x_pos, current_y), prefix_sys + system_info_content_lines[0], font=content_font_medium, fill=text_block_fill)
         current_y += LINE_SPACING
-        
         for line in system_info_content_lines[1:]:
             draw.text((x_pos + prefix_width_sys, current_y), line.lstrip(), font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
@@ -740,40 +768,33 @@ class ServerMonitor(Star):
             current_y += LINE_SPACING
         else:
             first_label, first_value = temp_data_list[0]
-            draw.text((x_pos, current_y), temp_prefix + first_label + first_value, 
-                      font=content_font_medium, fill=text_block_fill)
+            draw.text((x_pos, current_y), temp_prefix + first_label + first_value, font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
-            
             for label, value in temp_data_list[1:]:
-                draw.text((temp_start_x, current_y), label + value, 
-                          font=content_font_medium, fill=text_block_fill)
+                draw.text((temp_start_x, current_y), label + value, font=content_font_medium, fill=text_block_fill)
                 current_y += LINE_SPACING
 
-        mem_total_mb = data['mem_total_mb']
-        mem_used_mb = data['mem_used_mb']
-        if mem_total_mb is not None and mem_used_mb is not None:
-            mem_usage_text = f"内存使用: {mem_used_mb:.0f}MB / {mem_total_mb:.0f}MB"
-            draw.text((x_pos, current_y), mem_usage_text, font=content_font_medium, fill=text_block_fill)
+        if data['mem_total_mb'] is not None and data['mem_used_mb'] is not None:
+            draw.text((x_pos, current_y),
+                      f"内存使用: {data['mem_used_mb']:.0f}MB / {data['mem_total_mb']:.0f}MB",
+                      font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
-        
+
         if self.monitor_battery_status and data['bat_data']['percent'] is not None:
             draw.text((x_pos, current_y), data['bat_data']['status_text'], font=content_font_medium, fill=text_block_fill)
             current_y += LINE_SPACING
 
-        info_lines_block1_simple = [
+        for line, font in [
             (f"运行时间: {data['uptime']}", content_font_medium),
             (f"当前时间: {data['current_time']}", content_font_medium),
-        ]
-
-        for line, font in info_lines_block1_simple:
+        ]:
             draw.text((x_pos, current_y), line, font=font, fill=text_block_fill)
             current_y += LINE_SPACING
 
         current_y += MARGIN // 2
-
-        net_traffic_text = f"网络流量: ↑{data['net_sent']:.2f}MB ↓{data['net_recv']:.2f}MB"
-        draw.text((x_pos, current_y), net_traffic_text, font=content_font_medium, fill=text_block_fill)
-        current_y += LINE_SPACING
+        draw.text((x_pos, current_y),
+                  f"网络流量: ↑{data['net_sent']:.2f}MB ↓{data['net_recv']:.2f}MB",
+                  font=content_font_medium, fill=text_block_fill)
 
         charts = [
             ("CPU", data['cpu_percent'], data['cpu_image']),
@@ -782,34 +803,22 @@ class ServerMonitor(Star):
         ]
         
         total_B_block_height = num_charts * CHART_SIZE + total_vertical_spacing
-
-        initial_y_offset_B = (total_card_vertical_space - total_B_block_height) // 2 
-        current_chart_y = MARGIN + initial_y_offset_B
-        
+        current_chart_y = MARGIN + (total_card_vertical_space - total_B_block_height) // 2
         chart_center_x = CHART_AREA_RIGHT_START_X + CHART_SIZE // 2 
 
         for label, value, chart_img in charts:
-
             label_y = current_chart_y + LABEL_TOP_PADDING 
-            
-            label_text = label 
-            label_bbox = draw.textbbox((0, 0), label_text, font=label_font)
-            label_w = label_bbox[2] - label_bbox[0]
-            label_x = chart_center_x - label_w // 2 
-            
-            draw.text((label_x, label_y), label_text, font=label_font, fill=self.font_color)
-
+            label_w = draw.textbbox((0, 0), label, font=label_font)[2] - draw.textbbox((0, 0), label, font=label_font)[0]
+            draw.text((chart_center_x - label_w // 2, label_y), label, font=label_font, fill=self.font_color)
             chart_y = label_y + label_h + LABEL_CHART_GAP 
             chart_x = chart_center_x - CHART_SIZE // 2 
-
-            resized_chart_img = chart_img.resize((CHART_SIZE, CHART_SIZE), Image.Resampling.LANCZOS) 
-
-            canvas.paste(resized_chart_img, (int(chart_x), int(chart_y)), resized_chart_img) 
-            
+            canvas.paste(chart_img.resize((CHART_SIZE, CHART_SIZE), Image.Resampling.LANCZOS),
+                         (int(chart_x), int(chart_y)), chart_img.resize((CHART_SIZE, CHART_SIZE), Image.Resampling.LANCZOS))
             current_chart_y = chart_y + CHART_SIZE + gap 
 
         return canvas
-    
+
+    # ── card assembly ─────────────────────────────────────────────────────────
 
     def _draw_status_card(self, data: Dict[str, Any], avatar_img: Image.Image, user_name: str) -> Image.Image:
         canvas = None
@@ -821,21 +830,31 @@ class ServerMonitor(Star):
                 else:
                     bg_path = PLUGIN_DIR / self.bg_image_path
                     canvas = Image.open(str(bg_path)).convert("RGBA")
-                    
                     if self.blur_radius > 0:
                         canvas = canvas.convert("RGB").filter(ImageFilter.GaussianBlur(self.blur_radius)).convert("RGBA")
-                        
             except Exception:
                 pass
         
         if canvas is None:
-            CARD_WIDTH, CARD_HEIGHT = 900, 350 
-            canvas = Image.new('RGB', (CARD_WIDTH, CARD_HEIGHT), self.background_color).convert("RGBA")
+            canvas = Image.new('RGB', (900, 350), self.background_color).convert("RGBA")
 
         if self.is_horizontal:
-            return self._draw_horizontal_layout(canvas, data, avatar_img, user_name)
+            canvas = self._draw_horizontal_layout(canvas, data, avatar_img, user_name)
         else:
-            return self._draw_vertical_layout(canvas, data, avatar_img, user_name)
+            canvas = self._draw_vertical_layout(canvas, data, avatar_img, user_name)
+
+        # ── Append neofetch panel below the main card ─────────────────────────
+        if self.neofetch_enabled:
+            neo_lines = self._get_neofetch_output()
+            neo_panel = self._build_neofetch_panel(neo_lines, canvas.width)
+            combined = Image.new('RGBA', (canvas.width, canvas.height + neo_panel.height), (0, 0, 0, 0))
+            combined.paste(canvas, (0, 0))
+            combined.paste(neo_panel, (0, canvas.height))
+            return combined
+
+        return canvas
+
+    # ── command ───────────────────────────────────────────────────────────────
 
     @command("状态", alias=["status","info"])
     async def server_status(self, event):
@@ -846,28 +865,20 @@ class ServerMonitor(Star):
             mem = psutil.virtual_memory()
             disk = psutil.disk_usage('/')
             mem_percent = mem.percent
-            mem_total_mb = round(mem.total / (1000 * 1000) , 0)
+            mem_total_mb = round(mem.total / (1000 * 1000), 0)
             mem_used_mb = round(mem.used / (1000 * 1000), 2)
-            
             disk_percent = disk.percent
-            
-            cpu_usage = psutil.cpu_percent(interval=0.1)         
+            cpu_usage = psutil.cpu_percent(interval=0.1)
 
             net = psutil.net_io_counters()
-
-            total_bytes_sent = net.bytes_sent
-            total_bytes_recv = net.bytes_recv
-
-            total_mb_sent = total_bytes_sent / (1024 * 1024)
-            total_mb_recv = total_bytes_recv / (1024 * 1024)
+            total_mb_sent = net.bytes_sent / (1024 * 1024)
+            total_mb_recv = net.bytes_recv / (1024 * 1024)
 
             temp_results, bat_data = self._get_sensor_data()
 
-            chart_size_placeholder = 300 
-            cpu_image = self._create_pie_chart(cpu_usage, self.bing_dark, self.bing_light, chart_size_placeholder)
-            mem_image = self._create_pie_chart(mem_percent, self.bing_dark, self.bing_light, chart_size_placeholder)
-            disk_image = self._create_pie_chart(disk_percent, self.bing_dark, self.bing_light, chart_size_placeholder)
-
+            cpu_image = self._create_pie_chart(cpu_usage, self.bing_dark, self.bing_light, 300)
+            mem_image = self._create_pie_chart(mem_percent, self.bing_dark, self.bing_light, 300)
+            disk_image = self._create_pie_chart(disk_percent, self.bing_dark, self.bing_light, 300)
 
             status_data = {
                 'cpu_percent': cpu_usage,
@@ -880,7 +891,10 @@ class ServerMonitor(Star):
                 'disk_image': disk_image,
                 'temp_results': temp_results, 
                 'bat_data': bat_data, 
-                'system_info': f"{platform.system()} {platform.release()} ({platform.machine()})" if self.system_info == 'default' or not self.system_info else self.system_info,
+                'system_info': (
+                    f"{platform.system()} {platform.release()} ({platform.machine()})"
+                    if self.system_info in ('default', '') else self.system_info
+                ),
                 'uptime': self._get_uptime(),
                 'net_sent': total_mb_sent,
                 'net_recv': total_mb_recv,
@@ -888,16 +902,13 @@ class ServerMonitor(Star):
             }
             
             pic = self._draw_status_card(status_data, avatar_img, user_name)
-            
             file_path = "status.png"
             pic.save(file_path)
-            
             yield event.image_result(file_path)
 
         except Exception as e:
             import traceback
-            error_message = f"⚠️ 状态获取失败: {str(e)}\nTraceback: {traceback.format_exc()}"
-            yield event.plain_result(error_message)
+            yield event.plain_result(f"⚠️ 状态获取失败: {str(e)}\nTraceback: {traceback.format_exc()}")
 
     async def terminate(self):
         if self._monitor_task and not self._monitor_task.cancelled():
