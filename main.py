@@ -338,27 +338,36 @@ class ServerMonitor(Star):
         Given plain-text lines from the tmux pane, find the column where
         system info starts and return (ascii_lines, info_lines).
 
-        Neofetch always pads the ASCII art to a fixed column width before
-        printing key: value info. We detect that boundary by finding where
-        info-bearing lines (those with ': ' or '@') consistently have a
-        large whitespace gap.
+        Key insight: ASCII art can contain internal gaps of 2+ spaces, so
+        searching for the FIRST gap picks the wrong column. Instead we search
+        for the LAST gap on each info-bearing line — that last gap is always
+        the separator between the ASCII block and the info column.
+        We also require a minimum gap of 3 spaces so single-space word gaps
+        inside info text (e.g. "Ubuntu 22.04") are never mistaken for the split.
         """
         from collections import Counter
-        info_re = re.compile(r': |@')
-        gap_re  = re.compile(r'\s{2,}(\S)')
+
+        # Only examine lines that clearly carry key: value or user@host info
+        info_re = re.compile(r'\w.*(?:: |\w@\w)')
+        # Gap must be at least 3 spaces to distinguish from content spacing
+        gap_re  = re.compile(r'\s{3,}')
 
         positions = []
         for line in grid_lines:
-            if info_re.search(line):
-                m = gap_re.search(line)
-                if m:
-                    positions.append(m.start(1))
+            if not info_re.search(line):
+                continue
+            # Find ALL gaps, take the LAST one — that's the ascii/info boundary
+            gaps = list(gap_re.finditer(line))
+            if gaps:
+                positions.append(gaps[-1].end())
 
         if not positions:
             # No clear two-column structure — return everything as ascii
             return grid_lines, [''] * len(grid_lines)
 
-        split_col = Counter(positions).most_common(1)[0][0]
+        # The most common last-gap-end position is the reliable split column.
+        # Clamp to a minimum of 8 chars so we never split a pure-info line.
+        split_col = max(8, Counter(positions).most_common(1)[0][0])
 
         ascii_lines = [line[:split_col].rstrip() for line in grid_lines]
         info_lines  = [line[split_col:].strip() if len(line) > split_col else ''
