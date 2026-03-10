@@ -266,64 +266,103 @@ class ServerMonitor(Star):
 
     def _get_neofetch_columns(self) -> Tuple[List[str], List[str]]:
         """
-        Run neofetch and split output into (ascii_lines, info_lines).
-
-        Neofetch prints ASCII art on the left and system info on the right,
-        padded to a consistent column. We auto-detect that split column by
-        finding where info-looking text (patterns with ': ' or '@') consistently
-        starts after a whitespace gap.
+        Run neofetch inside a temporary tmux session, then use
+        `tmux capture-pane -p` to get the already-rendered plain-text grid.
+        This avoids any PTY or ANSI simulation complexity — tmux does the
+        terminal emulation for us.
         """
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
+        import uuid
+        session = f'visistat_{uuid.uuid4().hex[:8]}'
         try:
             cmd = ['neofetch']
             if self.neofetch_extra_args:
                 cmd += self.neofetch_extra_args.split()
-            result = subprocess.run(
-                cmd,
-                capture_output=True, text=True, timeout=15,
-                env={**os.environ, 'TERM': 'xterm-256color'}
+
+            env = {**os.environ, 'TERM': 'xterm-256color'}
+
+            # Create a detached tmux session with a wide window so neofetch
+            # doesn't wrap its ASCII art
+            subprocess.run(
+                ['tmux', 'new-session', '-d', '-s', session, '-x', '300', '-y', '50'],
+                env=env, check=True, capture_output=True
             )
-            raw = result.stdout
-            lines = [ansi_escape.sub('', line) for line in raw.split('\n')]
 
-            # Trim surrounding blank lines
-            while lines and not lines[0].strip():
-                lines.pop(0)
-            while lines and not lines[-1].strip():
-                lines.pop()
+            # Run neofetch inside the session and wait for it to finish
+            neofetch_cmd = ' '.join(cmd)
+            subprocess.run(
+                ['tmux', 'send-keys', '-t', session, neofetch_cmd + '; tmux wait-for -S done', 'Enter'],
+                env=env, check=True, capture_output=True
+            )
+            subprocess.run(
+                ['tmux', 'wait-for', 'done'],
+                env=env, timeout=15, capture_output=True
+            )
 
-            # Auto-detect split column.
-            # Collect positions where info-looking text starts after a whitespace gap.
-            # Info lines contain ': ' (key: value) or '@' (user@host).
-            info_pattern = re.compile(r': |@')
-            gap_pattern   = re.compile(r'\s{2,}(\w)')
-            from collections import Counter
-            positions = []
-            for line in lines:
-                if info_pattern.search(line):
-                    m = gap_pattern.search(line)
-                    if m:
-                        positions.append(m.start(1))
-
-            if not positions:
-                # No clear two-column structure — return everything as ascii, no info
-                return lines, [''] * len(lines)
-
-            # Most common starting position is the reliable split column
-            split_col = Counter(positions).most_common(1)[0][0]
-
-            ascii_lines = [line[:split_col].rstrip() for line in lines]
-            info_lines  = [line[split_col:].strip() if len(line) > split_col else ''
-                           for line in lines]
-            return ascii_lines, info_lines
+            # Capture the pane contents as plain text (no ANSI codes)
+            result = subprocess.run(
+                ['tmux', 'capture-pane', '-p', '-t', session],
+                env=env, capture_output=True, text=True, check=True
+            )
+            raw_lines = result.stdout.split('\n')
 
         except FileNotFoundError:
-            err = ["neofetch not found", "sudo apt install neofetch"]
-            return err, [''] * len(err)
+            return ['tmux not found'], ['']
+        except subprocess.CalledProcessError as e:
+            return [f'tmux error: {e}'], ['']
         except Exception as e:
-            err = [f"neofetch error: {e}"]
-            return err, ['']
+            return [f'neofetch error: {e}'], ['']
+        finally:
+            # Always kill the session to avoid leaking it
+            subprocess.run(
+                ['tmux', 'kill-session', '-t', session],
+                capture_output=True
+            )
+
+        # Strip trailing whitespace per line; trim surrounding blank lines
+        grid_lines = [l.rstrip() for l in raw_lines]
+        while grid_lines and not grid_lines[0].strip():  grid_lines.pop(0)
+        while grid_lines and not grid_lines[-1].strip(): grid_lines.pop()
+
+        return self._split_neofetch_columns(grid_lines)
+
+    def _split_neofetch_columns(self, grid_lines: List[str]) -> Tuple[List[str], List[str]]:
+        """
+        Given plain-text lines from the tmux pane, find the column where
+        system info starts and return (ascii_lines, info_lines).
+
+        Neofetch always pads the ASCII art to a fixed column width before
+        printing key: value info. We detect that boundary by finding where
+        info-bearing lines (those with ': ' or '@') consistently have a
+        large whitespace gap.
+        """
+        from collections import Counter
+        info_re = re.compile(r': |@')
+        gap_re  = re.compile(r'\s{2,}(\S)')
+
+        positions = []
+        for line in grid_lines:
+            if info_re.search(line):
+                m = gap_re.search(line)
+                if m:
+                    positions.append(m.start(1))
+
+        if not positions:
+            # No clear two-column structure — return everything as ascii
+            return grid_lines, [''] * len(grid_lines)
+
+        split_col = Counter(positions).most_common(1)[0][0]
+
+        ascii_lines = [line[:split_col].rstrip() for line in grid_lines]
+        info_lines  = [line[split_col:].strip() if len(line) > split_col else ''
+                       for line in grid_lines]
+
+        # Trim leading/trailing rows that are blank in BOTH columns
+        while ascii_lines and not ascii_lines[0].strip() and not (info_lines[0] if info_lines else '').strip():
+            ascii_lines.pop(0); info_lines.pop(0)
+        while ascii_lines and not ascii_lines[-1].strip() and not (info_lines[-1] if info_lines else '').strip():
+            ascii_lines.pop(); info_lines.pop()
+
+        return ascii_lines, info_lines
 
 
     def _lolcat_color(self, line_idx: int, char_idx: int) -> Tuple[int, int, int]:

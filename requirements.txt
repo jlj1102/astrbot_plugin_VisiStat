@@ -2,3 +2,4 @@ psutil
 matplotlib
 Pillow
 wmi; platform_system == "Windows"
+collections
