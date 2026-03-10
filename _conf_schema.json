@@ -38,7 +38,7 @@
             },
             "blur_radius": {
                 "description": "背景模糊半径 (0为不模糊)",
-                "type": "int", 
+                "type": "int",
                 "default": 10
             }
         }
@@ -146,7 +146,7 @@
         }
     },
     "neofetch_config": {
-        "description": "neofetch 输出面板设置（附加在卡片底部）",
+        "description": "neofetch 输出面板设置（附加在卡片底部，需要安装 tmux 和 neofetch）",
         "type": "object",
         "items": {
             "enabled": {
@@ -167,10 +167,16 @@
                 "hint": "例如：--disable packages --disable theme，留空则使用默认输出"
             },
             "background_color": {
-                "description": "neofetch 面板的背景颜色",
+                "description": "无背景图时 neofetch 面板的背景颜色",
                 "type": "string",
                 "default": "#0d1117",
                 "hint": "16进制颜色代码，推荐深色背景以衬托彩虹文字"
+            },
+            "dark_overlay": {
+                "description": "背景图上叠加的黑色遮罩不透明度（0.0=无遮罩，1.0=全黑）",
+                "type": "float",
+                "default": 0.55,
+                "hint": "推荐范围 0.3–0.7，值越大背景越暗、文字越清晰"
             },
             "rainbow_freq": {
                 "description": "彩虹色每行色相偏移量（模拟 lolcat --freq）",
