@@ -264,8 +264,17 @@ class ServerMonitor(Star):
 
     # ── neofetch / lolcat ─────────────────────────────────────────────────────
 
-    def _get_neofetch_output(self) -> List[str]:
-        """Run neofetch and return clean lines (ANSI codes stripped)."""
+    def _get_neofetch_columns(self) -> Tuple[List[str], List[str]]:
+        """
+        Run neofetch and split output into (ascii_lines, info_lines).
+
+        Neofetch prints ASCII art on the left and system info on the right,
+        padded to a consistent column. We auto-detect that split column by
+        finding where info-looking text (patterns with ': ' or '@') consistently
+        starts after a whitespace gap.
+        """
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
         try:
             cmd = ['neofetch']
             if self.neofetch_extra_args:
@@ -276,20 +285,46 @@ class ServerMonitor(Star):
                 env={**os.environ, 'TERM': 'xterm-256color'}
             )
             raw = result.stdout
-            # Strip all ANSI / VT escape sequences
-            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             lines = [ansi_escape.sub('', line) for line in raw.split('\n')]
-            # Trim surrounding blank lines, preserve internal ones
+
+            # Trim surrounding blank lines
             while lines and not lines[0].strip():
                 lines.pop(0)
             while lines and not lines[-1].strip():
                 lines.pop()
-            return lines
+
+            # Auto-detect split column.
+            # Collect positions where info-looking text starts after a whitespace gap.
+            # Info lines contain ': ' (key: value) or '@' (user@host).
+            info_pattern = re.compile(r': |@')
+            gap_pattern   = re.compile(r'\s{2,}(\w)')
+            from collections import Counter
+            positions = []
+            for line in lines:
+                if info_pattern.search(line):
+                    m = gap_pattern.search(line)
+                    if m:
+                        positions.append(m.start(1))
+
+            if not positions:
+                # No clear two-column structure — return everything as ascii, no info
+                return lines, [''] * len(lines)
+
+            # Most common starting position is the reliable split column
+            split_col = Counter(positions).most_common(1)[0][0]
+
+            ascii_lines = [line[:split_col].rstrip() for line in lines]
+            info_lines  = [line[split_col:].strip() if len(line) > split_col else ''
+                           for line in lines]
+            return ascii_lines, info_lines
+
         except FileNotFoundError:
-            return ["neofetch not found",
-                    "Install with: sudo apt install neofetch"]
+            err = ["neofetch not found", "sudo apt install neofetch"]
+            return err, [''] * len(err)
         except Exception as e:
-            return [f"neofetch error: {e}"]
+            err = [f"neofetch error: {e}"]
+            return err, ['']
+
 
     def _lolcat_color(self, line_idx: int, char_idx: int) -> Tuple[int, int, int]:
         """
@@ -301,52 +336,52 @@ class ServerMonitor(Star):
         r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
         return (int(r * 255), int(g * 255), int(b * 255))
 
-    def _build_neofetch_panel(self, lines: List[str], card_width: int) -> Image.Image:
+    def _build_neofetch_panel(self, ascii_lines: List[str], info_lines: List[str], card_width: int) -> Image.Image:
         """
-        Render neofetch output with per-character lolcat rainbow colouring.
+        Render neofetch output as a horizontal two-column layout:
+        ASCII art on the left with lolcat rainbow, system info on the right
+        also with lolcat rainbow. Both columns share the same font and line grid.
         Returns a new RGBA image the same width as the main card.
         """
         font = self._load_monospace_font(self.neofetch_font_size)
 
-        # Measure line height
+        # Measure character dimensions (monospace: all chars same width)
         tmp = Image.new('RGB', (1, 1))
         tmp_draw = ImageDraw.Draw(tmp)
-        sample_bbox = tmp_draw.textbbox((0, 0), "Ag", font=font)
+        sample_bbox = tmp_draw.textbbox((0, 0), 'M', font=font)
+        char_w = sample_bbox[2] - sample_bbox[0]
         line_h = sample_bbox[3] - sample_bbox[1]
         line_spacing = int(line_h * 1.35)
 
         MARGIN = 20
         SEPARATOR_H = 2
+        COL_GAP = MARGIN          # gap between ascii column and info column
         hdr_font = self._load_font(self.content_font_path, self.neofetch_font_size)
-        HEADER_H = line_spacing + MARGIN          # one row for "── neofetch ──"
-        content_h = len(lines) * line_spacing + MARGIN
+        HEADER_H = line_spacing + MARGIN
+        num_lines = max(len(ascii_lines), len(info_lines))
+        content_h = num_lines * line_spacing + MARGIN
         panel_h = SEPARATOR_H + HEADER_H + content_h + MARGIN
 
-        # Use the main card's background image (already blurred if configured).
-        # Fall back to the configured flat colour when no image is set.
+        # ── Background ────────────────────────────────────────────────────────
         panel = None
         if self.bg_image_path:
             try:
                 bg_src = str(self.blurred_bg_path) if self.blurred_bg_path else str(PLUGIN_DIR / self.bg_image_path)
-                bg_img = Image.open(bg_src).convert("RGBA")
+                bg_img = Image.open(bg_src).convert('RGBA')
                 src_w, src_h = bg_img.size
-                # Scale to match card_width
                 scaled_h = int(src_h * card_width / src_w)
                 bg_img = bg_img.resize((card_width, scaled_h), Image.Resampling.LANCZOS)
-                # Tile vertically if the panel is taller than the scaled source
                 if scaled_h < panel_h:
                     tiled = Image.new('RGBA', (card_width, panel_h))
                     for y in range(0, panel_h, scaled_h):
                         tiled.paste(bg_img, (0, y))
                     panel = tiled
                 else:
-                    # Crop from the bottom so the panel feels like a continuation
                     top = scaled_h - panel_h
                     panel = bg_img.crop((0, top, card_width, top + panel_h))
-                # If we used the original (non-blurred) image, apply blur now
                 if self.blur_radius > 0 and not self.blurred_bg_path:
-                    panel = panel.convert("RGB").filter(
-                        ImageFilter.GaussianBlur(self.blur_radius)).convert("RGBA")
+                    panel = panel.convert('RGB').filter(
+                        ImageFilter.GaussianBlur(self.blur_radius)).convert('RGBA')
             except Exception:
                 panel = None
 
@@ -362,12 +397,12 @@ class ServerMonitor(Star):
 
         draw = ImageDraw.Draw(panel)
 
-        # Top separator
+        # ── Top separator ─────────────────────────────────────────────────────
         draw.line([(MARGIN, 0), (card_width - MARGIN, 0)],
                   fill=self.font_color, width=SEPARATOR_H)
 
-        # Centred header
-        header_text = "── neofetch ──"
+        # ── Centred header ────────────────────────────────────────────────────
+        header_text = '── neofetch ──'
         hdr_bbox = draw.textbbox((0, 0), header_text, font=hdr_font)
         hdr_w = hdr_bbox[2] - hdr_bbox[0]
         draw.text(
@@ -375,20 +410,37 @@ class ServerMonitor(Star):
             header_text, font=hdr_font, fill=self.font_color
         )
 
-        # Neofetch lines with lolcat rainbow, char by char
+        # ── Measure ascii column width (widest visible line) ──────────────────
+        ascii_col_chars = max((len(l) for l in ascii_lines), default=0)
+        ascii_col_px = ascii_col_chars * char_w + COL_GAP
+
+        # ── Draw both columns char-by-char with lolcat colours ────────────────
         current_y = SEPARATOR_H + HEADER_H
-        for line_idx, line in enumerate(lines):
+        for line_idx in range(num_lines):
+            # Left column: ASCII art
+            ascii_line = ascii_lines[line_idx] if line_idx < len(ascii_lines) else ''
             x = MARGIN
-            for char_idx, char in enumerate(line):
+            for char_idx, char in enumerate(ascii_line):
                 color = self._lolcat_color(line_idx, char_idx)
                 draw.text((x, current_y), char, font=font, fill=color)
-                cb = draw.textbbox((0, 0), char, font=font)
-                x += cb[2] - cb[0]
+                x += char_w
+
+            # Right column: system info — lolcat hue continues from ascii end
+            info_line = info_lines[line_idx] if line_idx < len(info_lines) else ''
+            x = MARGIN + ascii_col_px
+            # offset char_idx so hue continues seamlessly across the gap
+            char_offset = ascii_col_chars + COL_GAP // max(char_w, 1)
+            for char_idx, char in enumerate(info_line):
+                color = self._lolcat_color(line_idx, char_offset + char_idx)
+                draw.text((x, current_y), char, font=font, fill=color)
+                x += char_w
                 if x >= card_width - MARGIN:
                     break
+
             current_y += line_spacing
 
         return panel
+
 
     # ── sensor helpers ────────────────────────────────────────────────────────
 
@@ -873,8 +925,8 @@ class ServerMonitor(Star):
 
         # ── Append neofetch panel below the main card ─────────────────────────
         if self.neofetch_enabled:
-            neo_lines = self._get_neofetch_output()
-            neo_panel = self._build_neofetch_panel(neo_lines, canvas.width)
+            ascii_lines, info_lines = self._get_neofetch_columns()
+            neo_panel = self._build_neofetch_panel(ascii_lines, info_lines, canvas.width)
             combined = Image.new('RGBA', (canvas.width, canvas.height + neo_panel.height), (0, 0, 0, 0))
             combined.paste(canvas, (0, 0))
             combined.paste(neo_panel, (0, canvas.height))
