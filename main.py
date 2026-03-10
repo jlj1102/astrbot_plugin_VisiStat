@@ -265,9 +265,9 @@ class ServerMonitor(Star):
     # ── neofetch / lolcat ─────────────────────────────────────────────────────
 
     def _get_neofetch_output(self) -> List[str]:
-        """Run neofetch --stdout and return clean lines (ANSI codes stripped)."""
+        """Run neofetch and return clean lines (ANSI codes stripped)."""
         try:
-            cmd = ['neofetch', '--stdout']
+            cmd = ['neofetch']
             if self.neofetch_extra_args:
                 cmd += self.neofetch_extra_args.split()
             result = subprocess.run(
@@ -315,15 +315,6 @@ class ServerMonitor(Star):
         line_h = sample_bbox[3] - sample_bbox[1]
         line_spacing = int(line_h * 1.35)
 
-        # Parse background colour
-        try:
-            r = int(self.neofetch_bg_color[1:3], 16)
-            g = int(self.neofetch_bg_color[3:5], 16)
-            b = int(self.neofetch_bg_color[5:7], 16)
-            bg_color: tuple = (r, g, b, 255)
-        except Exception:
-            bg_color = (13, 17, 23, 255)
-
         MARGIN = 20
         SEPARATOR_H = 2
         hdr_font = self._load_font(self.content_font_path, self.neofetch_font_size)
@@ -331,7 +322,44 @@ class ServerMonitor(Star):
         content_h = len(lines) * line_spacing + MARGIN
         panel_h = SEPARATOR_H + HEADER_H + content_h + MARGIN
 
-        panel = Image.new('RGBA', (card_width, panel_h), bg_color)
+        # Use the main card's background image (already blurred if configured).
+        # Fall back to the configured flat colour when no image is set.
+        panel = None
+        if self.bg_image_path:
+            try:
+                bg_src = str(self.blurred_bg_path) if self.blurred_bg_path else str(PLUGIN_DIR / self.bg_image_path)
+                bg_img = Image.open(bg_src).convert("RGBA")
+                src_w, src_h = bg_img.size
+                # Scale to match card_width
+                scaled_h = int(src_h * card_width / src_w)
+                bg_img = bg_img.resize((card_width, scaled_h), Image.Resampling.LANCZOS)
+                # Tile vertically if the panel is taller than the scaled source
+                if scaled_h < panel_h:
+                    tiled = Image.new('RGBA', (card_width, panel_h))
+                    for y in range(0, panel_h, scaled_h):
+                        tiled.paste(bg_img, (0, y))
+                    panel = tiled
+                else:
+                    # Crop from the bottom so the panel feels like a continuation
+                    top = scaled_h - panel_h
+                    panel = bg_img.crop((0, top, card_width, top + panel_h))
+                # If we used the original (non-blurred) image, apply blur now
+                if self.blur_radius > 0 and not self.blurred_bg_path:
+                    panel = panel.convert("RGB").filter(
+                        ImageFilter.GaussianBlur(self.blur_radius)).convert("RGBA")
+            except Exception:
+                panel = None
+
+        if panel is None:
+            try:
+                r = int(self.neofetch_bg_color[1:3], 16)
+                g = int(self.neofetch_bg_color[3:5], 16)
+                b = int(self.neofetch_bg_color[5:7], 16)
+                fallback_color: tuple = (r, g, b, 255)
+            except Exception:
+                fallback_color = (13, 17, 23, 255)
+            panel = Image.new('RGBA', (card_width, panel_h), fallback_color)
+
         draw = ImageDraw.Draw(panel)
 
         # Top separator
